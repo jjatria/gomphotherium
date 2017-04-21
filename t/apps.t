@@ -16,6 +16,7 @@
 
 use Test::More;
 use Test::Mojo;
+use Mojo::JSON qw(decode_json);
 use FindBin;
 use strict;
 use warnings;
@@ -29,6 +30,7 @@ my $t = Test::Mojo->new;
 
 # curl -X POST -d "client_name=Oddmuse&redirect_uris=urn:ietf:wg:oauth:2.0:oob&scopes=read" -Ss http://localhost:3000/api/v1/apps
 
+# register client
 $t->post_ok('/api/v1/apps' => form => {
   client_name => 'Oddmuse',
   redirect_uris => 'urn:ietf:wg:oauth:2.0:oob',
@@ -37,5 +39,47 @@ $t->post_ok('/api/v1/apps' => form => {
     ->json_has('/id')
     ->json_has('/client_id')
     ->json_has('/client_secret');
+
+# remember client stuff
+my $hash	  = decode_json $t->tx->res->body;
+my $client_id	  = $hash->{client_id};
+my $client_secret = $hash->{client_secret};
+
+# curl -X POST -d "username=alex&email=kensanata@gmail.com&password=*secret*" -Ss http://localhost:3000/auth
+
+# create user
+$t->post_ok('/auth' => form => {
+  username => 'alex',
+  password => '*secret*',
+  email => 'alex@gnu.org',
+  scopes => 'read'})
+    ->status_is(200);
+
+# FIXME: make sure we can't register twice
+# $t->post_ok('/auth' => form => {
+#   username => 'alex',
+#   email => 'alex@gnu.org',
+#   password => '*secret*',
+#   scopes => 'read'})
+#     ->status_is(500)
+#     ->text_is('User already exists');
+
+# curl -X POST -d "client_id=CLIENT_ID_HERE&client_secret=CLIENT_SECRET_HERE&grant_type=password&username=YOUR_EMAIL&password=YOUR_PASSWORD" -Ss http://localhost:3000/oauth/token
+# curl -X POST -d "client_id=456106006&client_secret=1234&grant_type=password&username=kensanata@gmail.com&password=*secret*" -Ss http://localhost:3000/oauth/token
+
+# authenticate using password
+$t->post_ok('/oauth/token' => form => {
+  client_id => $client_id,
+  client_secret => $client_secret,
+  grant_type => 'password',
+  username => 'alex@gnu.org',
+  password => '*secret*'})
+    ->status_is(200)
+    ->json_has('/access_token')
+    ->json_has('/refresh_token')
+    ->json_has('/token_type', 'Bearer');
+
+$hash		 = decode_json $t->tx->res->body;
+my $access_token = $hash->{access_token};
 
 done_testing();

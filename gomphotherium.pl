@@ -18,7 +18,8 @@ use Mojolicious::Lite;
 use Mojo::JSON qw(decode_json encode_json);
 use Mojo::Log;
 use Crypt::PRNG qw(irand random_bytes_b64);
-
+use Crypt::PBKDF2;
+ 
 # FIXME: configure where the log should go
 my $log = Mojo::Log->new;
 
@@ -34,22 +35,17 @@ my $dbh = DBI->connect("dbi:SQLite:database.db","","") or $log->fatal("Could not
 # add helper methods for interacting with database
 helper db => sub { $dbh };
 
+
+# clients
 helper create_clients_table => sub {
   my $self = shift;
-  $log->info("Creating table 'clients'");
-  $self->db->do(qq'CREATE TABLE clients (id INTEGER PRIMARY KEY, client_id INTEGER UNIQUE, client_secret VARCHAR(200), name VARCHAR(200), website VARCHAR(200));');
+  unless (eval { $self->db->prepare('SELECT id, client_id, client_secret, name, website FROM clients') } ) {
+    $log->info("Creating table 'clients'");
+    $self->db->do('CREATE TABLE clients (id INTEGER PRIMARY KEY, client_id INTEGER UNIQUE, client_secret, name, website)');
+  }
 };
 
-helper get_clients => sub {
-  my $self = shift;
-  my $sth = eval { $self->db->prepare('SELECT name, website FROM clients') } || return undef;
-  $sth->execute;
-  my $rows = $sth->fetchall_arrayref;
-  for my $client (@{$rows}) {
-    map { $_ = decode('utf-8',$_) } @{$client};
-  }
-  return $rows;
-};
+app->create_clients_table;
 
 helper register_client => sub {
   my $self = shift;
@@ -72,12 +68,136 @@ helper register_client => sub {
   return {id => $id, client_id => $client_id, client_secret => $client_secret};
 };
 
-# if statement didn't prepare, assume its because the table doesn't exist
-app->get_clients || app->create_clients_table;
+helper verify_client => sub {
+  my $self = shift;
+  my ($client_id, $client_secret) = @_;
+  my $sth = eval { $self->db->prepare('SELECT 1 FROM clients WHERE client_id = ? AND client_secret = ?') } || $log->fatal("Cannot select client secret from database");
+  $sth->execute($client_id, $client_secret);
+  my ($exists) = $sth->fetchrow_array;
+  return $exists;
+};
 
-# Code from Net-OAuth2-AuthorizationServer
+
+# users
+helper create_users_table => sub {
+  my $self = shift;
+  unless (eval { $self->db->prepare('SELECT id, username, password, email, is_confirmed FROM users') } ) {
+    $log->info("Creating table 'users'");
+    $self->db->do('CREATE TABLE users (id INTEGER PRIMARY KEY, username, password, email, is_confirmed)');
+  }
+};
+
+app->create_users_table;
+
+# https://perlmaven.com/storing-passwords-in-a-an-easy-but-secure-way
+my $pbkdf2 = Crypt::PBKDF2->new(hash_class => 'HMACSHA2');
+
+helper register_user => sub {
+  my $self = shift;
+  my ($username, $email, $password) = @_;
+  # does the user already exist?
+  my $sth = eval { $self->db->prepare('SELECT 1 FROM users WHERE username = ?') } || $log->fatal("Cannot select user from database");
+  $sth->execute($username);
+  my ($exists) = $sth->fetchrow_array;
+  if ($exists) {
+    $log->info("Attempting to register the existing name '$username'");
+    $self->render(status => 500, text => 'User already exists');
+  }
+  my $hash = $pbkdf2->generate($password);
+  $sth = eval { $dbh->prepare('INSERT INTO users (username, email, password, is_confirmed) VALUES (?, ?, ?, 0)') } || $log->fatal("Cannot insert user into database");
+  $sth->execute($username, $email, $hash);
+  return {};
+};
+
+helper verify_user => sub {
+  my $self = shift;
+  my ($username, $password) = @_;
+  # strange but true: we are getting the email address in the username param
+  my $sth = eval { $self->db->prepare('SELECT password FROM users WHERE email = ?') } || $log->fatal("Cannot select user password from database");
+  $sth->execute($username);
+  my ($hash) = $sth->fetchrow_array;
+  return $pbkdf2->validate($hash, $password);
+};
+
+
+# tokens
+helper create_tokens_table => sub {
+  my $self = shift;
+  unless (eval { $self->db->prepare('SELECT access_token, scope, expires, refresh_token, client_id, user_id FROM access_tokens') } ) {
+    $log->info("Creating table 'access_tokens'");
+    $self->db->do('CREATE TABLE access_tokens (access_token, scope, expires, refresh_token, client_id INTEGER, user_id INTEGER)');
+  }
+  unless (eval { $self->db->prepare('SELECT refresh_token, access_token, scope, client_id, user_id FROM refresh_tokens') } ) {
+    $log->info("Creating table 'refresh_tokens'");
+    $self->db->do('CREATE TABLE refresh_tokens (refresh_token, access_token, scope, client_id INTEGER, user_id INTEGER)');
+  }
+};
+
+app->create_tokens_table;
+
+helper get_refresh_token => sub {
+  my $self = shift;
+  my ($refresh_token) = @_;
+  my $sth = eval { $self->db->prepare('SELECT access_token, scope, user_id FROM refresh_tokens WHERE refresh_token = ?') } || $log->fatal("Cannot select refresh_token from database");
+  $sth->execute($refresh_token);
+  my ($access_token, $scope, $user_id) = $sth->fetchrow_array;
+  return {access_token => $access_token, scope => $scope, user_id => $user_id};
+};
+
+helper remove_access_token => sub {
+  my $self = shift;
+  my ($access_token) = @_;
+  my $sth = eval { $self->db->prepare('DELETE FROM access_token WHERE access_token = ?') } || $log->fatal("Cannot delete access_token from database");
+  $sth->execute($access_token);
+};
+
+helper remove_refresh_token => sub {
+  my $self = shift;
+  my ($client_id, $user_id) = @_;
+  my $sth = eval { $self->db->prepare('DELETE FROM refresh_tokens WHERE client_id = ? AND user_id = ?') } || $log->fatal("Cannot delete refresh_token from database");
+  $sth->execute($client_id, $user_id);
+};
+
+helper add_access_token => sub {
+  my $self = shift;
+  my ($access_token, $scope, $expires, $refresh_token, $client_id, $user_id) = @_;
+  my $sth = eval { $dbh->prepare('INSERT INTO access_tokens (access_token, scope, expires, refresh_token, client_id, user_id) VALUES (?, ?, ?, ?, ?, ?)') } || $log->fatal("Cannot insert access_token into database");
+  $sth->execute($access_token, $scope, $expires, $refresh_token, $client_id, $user_id);
+};
+
+helper add_refresh_token => sub {
+  my $self = shift;
+  my ($refresh_token, $access_token, $scope, $client_id, $user_id) = @_;
+  my $sth = eval { $dbh->prepare('INSERT INTO refresh_tokens (refresh_token, access_token, scope, client_id, user_id) VALUES (?, ?, ?, ?, ?)') } || $log->fatal("Cannot insert refresh_token into database");
+  $sth->execute($refresh_token, $access_token, $scope, $client_id, $user_id);
+};
+
+
+# tokens
+helper create_auth_codes_table => sub {
+  my $self = shift;
+  unless (eval { $self->db->prepare('SELECT auth_code, client_id, user_id, expires, redirect_uri, scope FROM auth_codes') } ) {
+    $log->info("Creating table 'auth_codes'");
+    $self->db->do('CREATE TABLE auth_codes (auth_code, client_id INTEGER, user_id INTEGER, expires, redirect_uri, scope)');
+  }
+};
+
+app->create_auth_codes_table;
+
+helper get_auth_code => sub {
+  my $self = shift;
+  my ($auth_code) = @_;
+  my $sth = eval { $self->db->prepare('SELECT client_id, user_id, expires, redirect_uri, scope FROM auth_codes WHERE auth_code = ?') } || $log->fatal("Cannot select auth_code from database");
+  $sth->execute($auth_code);
+  my ($client_id, $user_id, $expires, $redirect_uri, $scope) = $sth->fetchrow_array;
+  return {auth_code => $auth_code, client_id => $client_id, user_id => $user_id, expires => $expires, redirect_uri => $redirect_uri, scope => $scope};
+};
+
+
+# Code from Net::OAuth2::AuthorizationServer::Manual
 
 my $resource_owner_confirm_scopes_sub = sub {
+  $log->debug('resource_owner_confirm_scopes_sub');
   my ( %args ) = @_;
 
   my ( $obj,$client_id,$scopes_ref,$redirect_uri,$response_type )
@@ -103,6 +223,7 @@ my $resource_owner_confirm_scopes_sub = sub {
 };
 
 my $resource_owner_logged_in_sub = sub {
+  $log->debug('resource_owner_logged_in_sub');
   my ( %args ) = @_;
 
   my $c = $args{mojo_controller};
@@ -120,6 +241,7 @@ my $resource_owner_logged_in_sub = sub {
 };
 
 my $verify_client_sub = sub {
+  $log->debug('verify_client_sub');
   my ( %args ) = @_;
   
   my ( $obj,$client_id,$scopes_ref,$client_secret,$redirect_uri,$response_type )
@@ -160,6 +282,7 @@ my $verify_client_sub = sub {
 };
 
 my $store_auth_code_sub = sub {
+  $log->debug('store_auth_code_sub');
   my ( %args ) = @_;
 
   my ( $obj,$auth_code,$client_id,$expires_in,$uri,$scopes_ref ) =
@@ -180,6 +303,7 @@ my $store_auth_code_sub = sub {
 };
   
 my $verify_auth_code_sub = sub {
+  $log->debug('verify_auth_code_sub');
   my ( %args ) = @_;
 
   my ( $obj,$client_id,$client_secret,$auth_code,$uri )
@@ -227,77 +351,39 @@ my $verify_auth_code_sub = sub {
 };
 
 my $store_access_token_sub = sub {
-  my ( %args ) = @_;
-
-  my (
-    $obj,$client,$auth_code,$access_token,$refresh_token,
-    $expires_in,$scope,$old_refresh_token
-      ) = @args{qw/
-		    mojo_controller client_id auth_code access_token
-		    refresh_token expires_in scopes old_refresh_token
-		    / };
-
-  my $access_tokens  = $obj->db->get_collection( 'access_tokens' );
-  my $refresh_tokens = $obj->db->get_collection( 'refresh_tokens' );
-
+  $log->debug('store_access_token_sub');
+  my (%args) = @_;
+  my ($c, $client, $auth_code, $access_token, $refresh_token, $expires_in, $scope, $old_refresh_token)
+      = @args{qw/mojo_controller client_id auth_code access_token refresh_token expires_in scopes old_refresh_token/};
   my $user_id;
-
-  if ( ! defined( $auth_code ) && $old_refresh_token ) {
+  if (!defined($auth_code) && $old_refresh_token) {
     # must have generated an access token via refresh token so revoke the old
     # access token and refresh token (also copy required data if missing)
-    my $prev_rt = $obj->db->get_collection( 'refresh_tokens' )->find_one({
-      refresh_token => $old_refresh_token,
-									 });
-
-    my $prev_at = $obj->db->get_collection( 'access_tokens' )->find_one({
-      access_token => $prev_rt->{access_token},
-									});
-
+    my $prev_rt = $c->get_refresh_token($old_refresh_token);
     # access tokens can be revoked, whilst refresh tokens can remain so we
     # need to get the data from the refresh token as the access token may
     # no longer exist at the point that the refresh token is used
     $scope //= $prev_rt->{scope};
     $user_id = $prev_rt->{user_id};
-
     # need to revoke the access token
-    $obj->db->get_collection( 'access_tokens' )
-        ->remove({ access_token => $prev_at->{access_token} });
-
+    $c->remove_access_token($prev_rt->{access_token});
   } else {
-    $user_id = $obj->db->get_collection( 'auth_codes' )->find_one({
-      auth_code => $auth_code,
-								  })->{user_id};
+    $user_id = $c->get_auth_code($auth_code)->{user_id};
   }
-
-  if ( ref( $client ) ) {
+  # $client is now a client_id!
+  if (ref($client)) {
     $scope  = $client->{scope};
     $client = $client->{client_id};
   }
-
   # if the client has en existing refresh token we need to revoke it
-  $refresh_tokens->remove({ client_id => $client, user_id => $user_id });
-
-  $access_tokens->insert({
-    access_token  => $access_token,
-    scope         => $scope,
-    expires       => time + $expires_in,
-    refresh_token => $refresh_token,
-    client_id     => $client,
-    user_id       => $user_id,
-			 });
-
-  $refresh_tokens->insert({
-    refresh_token => $refresh_token,
-    access_token  => $access_token,
-    scope         => $scope,
-    client_id     => $client,
-    user_id       => $user_id,
-			  });
-
-  return;
+  $c->remove_refresh_token($client, $user_id);
+  # add new tokens
+  $c->add_access_token($access_token, $scope, time + $expires_in, $refresh_token, $client, $user_id);
+  $c->add_refresh_token($refresh_token, $access_token, $scope, $client, $user_id);
 };
 
 my $verify_access_token_sub = sub {
+  $log->debug('verify_access_token_sub');
   my ( %args ) = @_;
 
   my ( $obj,$access_token,$scopes_ref,$is_refresh_token )
@@ -350,34 +436,18 @@ my $verify_access_token_sub = sub {
 };
 
 my $verify_user_password_sub = sub {
-  my ( $self, %args ) = @_;
-
-  my ( $obj, $client_id, $client_secret, $username, $password, $scopes ) =
-      @args{ qw/ mojo_controller client_id client_secret username password scopes / };
-
-  my $client = $obj->db->get_collection( 'clients' )
-      ->find_one({ client_id => $client_id });
-
-  $client || return ( 0, 'unauthorized_client' );
-
-  my $user = $obj->db->get_collection( 'users' )
-      ->find_one({ username => $username });
-
-  if (
-    ! $user
-    or $client_secret ne $client->{client_secret}
-    # some routine to check the password against hashed + salted
-    or ! $obj->passwords_match( $user->{password},$password )
-      ) {
-    return ( 0, 'invalid_grant' );
-  }
-  else {
-    return ( $client_id, undef, $scopes, $username );
-  }
-
+  $log->debug('verify_user_password_sub');
+  my (%args) = @_;
+  my ($c, $client_id, $client_secret, $username, $password, $scopes) =
+      @args{qw/mojo_controller client_id client_secret username password scopes/};
+  $c->verify_client($client_id, $client_secret) || return (0, 'unauthorized_client');
+  $c->verify_user($username, $password) || return (0, 'unauthorized_user');
+  return ($client_id, undef, $scopes, $username);
 };
 
 plugin 'OAuth2::Server' => {
+  authorize_route              => '/oauth/authorize',
+  access_token_route           => '/oauth/token',
   login_resource_owner_cb      => $resource_owner_logged_in_sub,
   confirm_by_resource_owner_cb => $resource_owner_confirm_scopes_sub,
   verify_client_cb             => $verify_client_sub,
@@ -385,6 +455,7 @@ plugin 'OAuth2::Server' => {
   verify_auth_code_cb          => $verify_auth_code_sub,
   store_access_token_cb        => $store_access_token_sub,
   verify_access_token_cb       => $verify_access_token_sub,
+  verify_user_password_cb      => $verify_user_password_sub,
 };
 
 # group {
@@ -423,6 +494,26 @@ post '/api/v1/apps' => sub {
   my $website = $c->param('website');
   my $data = $c->register_client($name, $website);
   $c->render(json => $data);
+};
+
+# FIXME: should verify email address
+post '/auth' => sub {
+  my ($c) = @_;
+  # the typical web form uses 'user_account_attributes_username'
+  my $username = $c->param('username');
+  my $email = $c->param('email');
+  my $password = $c->param('password');
+  my $data = $c->register_user($username, $email, $password);
+  $c->render(json => $data);
+};
+
+post '/oauth/token' => sub {
+  my ($c) = @_;
+  if ($c->oauth) {
+    $c->render(json => {ok=>1});
+  } else {
+    $c->render(status => 401, text => 'Access denied');
+  }
 };
 
 app->start;
