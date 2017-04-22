@@ -38,20 +38,17 @@ helper db => sub { $dbh };
 
 # clients
 helper create_clients_table => sub {
-  my $self = shift;
-  unless (eval { $self->db->prepare('SELECT id, client_id, client_secret, name, website FROM clients') } ) {
-    $log->info("Creating table 'clients'");
-    $self->db->do('CREATE TABLE clients (id INTEGER PRIMARY KEY, client_id INTEGER UNIQUE, client_secret, name, website)');
-  }
+  my $c = shift;
+  $c->db->do('CREATE TABLE IF NOT EXISTS clients (id INTEGER PRIMARY KEY, client_id INTEGER UNIQUE, client_secret, name, website)');
 };
 
 app->create_clients_table;
 
 helper register_client => sub {
-  my $self = shift;
+  my $c = shift;
   my ($name, $website) = @_;
   # does the client already exist?
-  my $sth = eval { $self->db->prepare('SELECT id, client_id, client_secret FROM clients WHERE name = ?') } || $log->fatal("Cannot select client from database");
+  my $sth = eval { $c->db->prepare('SELECT id, client_id, client_secret FROM clients WHERE name = ?') } || $log->fatal("Cannot select client from database");
   $sth->execute($name);
   my ($id, $client_id, $client_secret) = $sth->fetchrow_array;
   if (not $id) {
@@ -61,7 +58,7 @@ helper register_client => sub {
     $sth = eval { $dbh->prepare('INSERT INTO clients (name, website, client_id, client_secret) VALUES (?, ?, ?, ?)') } || $log->fatal("Cannot insert client into database");
     $sth->execute($name, $website, $client_id, $client_secret);
     # fetch generated id
-    $sth = eval { $self->db->prepare('SELECT id FROM clients WHERE name = ?') } || $log->fatal("Cannot select new client id from database");
+    $sth = eval { $c->db->prepare('SELECT id FROM clients WHERE name = ?') } || $log->fatal("Cannot select new client id from database");
     $sth->execute($name);
     ($id) = $sth->fetchrow_array;
   }
@@ -69,9 +66,9 @@ helper register_client => sub {
 };
 
 helper verify_client => sub {
-  my $self = shift;
+  my $c = shift;
   my ($client_id, $client_secret) = @_;
-  my $sth = eval { $self->db->prepare('SELECT 1 FROM clients WHERE client_id = ? AND client_secret = ?') } || $log->fatal("Cannot select client secret from database");
+  my $sth = eval { $c->db->prepare('SELECT 1 FROM clients WHERE client_id = ? AND client_secret = ?') } || $log->fatal("Cannot select client secret from database");
   $sth->execute($client_id, $client_secret);
   my ($exists) = $sth->fetchrow_array;
   return $exists;
@@ -80,11 +77,8 @@ helper verify_client => sub {
 
 # users
 helper create_users_table => sub {
-  my $self = shift;
-  unless (eval { $self->db->prepare('SELECT id, username, password, email, is_confirmed FROM users') } ) {
-    $log->info("Creating table 'users'");
-    $self->db->do('CREATE TABLE users (id INTEGER PRIMARY KEY, username, password, email, is_confirmed)');
-  }
+  my $c = shift;
+  $c->db->do('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username, password, email, is_confirmed)');
 };
 
 app->create_users_table;
@@ -93,27 +87,28 @@ app->create_users_table;
 my $pbkdf2 = Crypt::PBKDF2->new(hash_class => 'HMACSHA2');
 
 helper register_user => sub {
-  my $self = shift;
+  my $c = shift;
   my ($username, $email, $password) = @_;
   # does the user already exist?
-  my $sth = eval { $self->db->prepare('SELECT 1 FROM users WHERE username = ?') } || $log->fatal("Cannot select user from database");
+  my $sth = eval { $c->db->prepare('SELECT 1 FROM users WHERE username = ?') } || $log->fatal("Cannot select user from database");
   $sth->execute($username);
   my ($exists) = $sth->fetchrow_array;
   if ($exists) {
     $log->info("Attempting to register the existing name '$username'");
-    $self->render(status => 500, text => 'User already exists');
+    $c->render(status => 500, text => 'User already exists');
+    return 0;
   }
   my $hash = $pbkdf2->generate($password);
   $sth = eval { $dbh->prepare('INSERT INTO users (username, email, password, is_confirmed) VALUES (?, ?, ?, 0)') } || $log->fatal("Cannot insert user into database");
   $sth->execute($username, $email, $hash);
-  return {};
+  return 1;
 };
 
 helper verify_user => sub {
-  my $self = shift;
+  my $c = shift;
   my ($username, $password) = @_;
   # strange but true: we are getting the email address in the username param
-  my $sth = eval { $self->db->prepare('SELECT password FROM users WHERE email = ?') } || $log->fatal("Cannot select user password from database");
+  my $sth = eval { $c->db->prepare('SELECT password FROM users WHERE email = ?') } || $log->fatal("Cannot select user password from database");
   $sth->execute($username);
   my ($hash) = $sth->fetchrow_array;
   return $pbkdf2->validate($hash, $password);
@@ -122,72 +117,74 @@ helper verify_user => sub {
 
 # tokens
 helper create_tokens_table => sub {
-  my $self = shift;
-  unless (eval { $self->db->prepare('SELECT access_token, scope, expires, refresh_token, client_id, user_id FROM access_tokens') } ) {
-    $log->info("Creating table 'access_tokens'");
-    $self->db->do('CREATE TABLE access_tokens (access_token, scope, expires, refresh_token, client_id INTEGER, user_id INTEGER)');
-  }
-  unless (eval { $self->db->prepare('SELECT refresh_token, access_token, scope, client_id, user_id FROM refresh_tokens') } ) {
-    $log->info("Creating table 'refresh_tokens'");
-    $self->db->do('CREATE TABLE refresh_tokens (refresh_token, access_token, scope, client_id INTEGER, user_id INTEGER)');
-  }
+  my $c = shift;
+  $c->db->do('CREATE TABLE IF NOT EXISTS access_tokens (access_token, scope, expires, refresh_token, client_id INTEGER, user_id INTEGER)');
+  $c->db->do('CREATE TABLE IF NOT EXISTS refresh_tokens (refresh_token, access_token, scope, client_id INTEGER, user_id INTEGER)');
 };
 
 app->create_tokens_table;
 
+helper get_access_token => sub {
+  my $c = shift;
+  my ($token) = @_;
+  my $sth = eval { $c->db->prepare('SELECT access_token, scope, expires, user_id FROM access_tokens WHERE access_token = ?') } || $log->fatal("Cannot select access_token from database");
+  $sth->execute($token);
+  my ($access_token, $scope, $expires, $user_id) = $sth->fetchrow_array;
+  $scope = [split(/ /, $scope)];
+  return {access_token => $access_token, scope => $scope, expires => $expires, user_id => $user_id};
+};
+
 helper get_refresh_token => sub {
-  my $self = shift;
-  my ($refresh_token) = @_;
-  my $sth = eval { $self->db->prepare('SELECT access_token, scope, user_id FROM refresh_tokens WHERE refresh_token = ?') } || $log->fatal("Cannot select refresh_token from database");
-  $sth->execute($refresh_token);
+  my $c = shift;
+  my ($token) = @_;
+  my $sth = eval { $c->db->prepare('SELECT access_token, scope, user_id FROM refresh_tokens WHERE refresh_token = ?') } || $log->fatal("Cannot select refresh_token from database");
+  $sth->execute($token);
   my ($access_token, $scope, $user_id) = $sth->fetchrow_array;
+  $scope = $scope && [split(/ /, $scope)];
   return {access_token => $access_token, scope => $scope, user_id => $user_id};
 };
 
 helper remove_access_token => sub {
-  my $self = shift;
+  my $c = shift;
   my ($access_token) = @_;
-  my $sth = eval { $self->db->prepare('DELETE FROM access_token WHERE access_token = ?') } || $log->fatal("Cannot delete access_token from database");
+  my $sth = eval { $c->db->prepare('DELETE FROM access_token WHERE access_token = ?') } || $log->fatal("Cannot delete access_token from database");
   $sth->execute($access_token);
 };
 
 helper remove_refresh_token => sub {
-  my $self = shift;
+  my $c = shift;
   my ($client_id, $user_id) = @_;
-  my $sth = eval { $self->db->prepare('DELETE FROM refresh_tokens WHERE client_id = ? AND user_id = ?') } || $log->fatal("Cannot delete refresh_token from database");
+  my $sth = eval { $c->db->prepare('DELETE FROM refresh_tokens WHERE client_id = ? AND user_id = ?') } || $log->fatal("Cannot delete refresh_token from database");
   $sth->execute($client_id, $user_id);
 };
 
 helper add_access_token => sub {
-  my $self = shift;
+  my $c = shift;
   my ($access_token, $scope, $expires, $refresh_token, $client_id, $user_id) = @_;
   my $sth = eval { $dbh->prepare('INSERT INTO access_tokens (access_token, scope, expires, refresh_token, client_id, user_id) VALUES (?, ?, ?, ?, ?, ?)') } || $log->fatal("Cannot insert access_token into database");
-  $sth->execute($access_token, $scope, $expires, $refresh_token, $client_id, $user_id);
+  $sth->execute($access_token, join(' ',@$scope), $expires, $refresh_token, $client_id, $user_id);
 };
 
 helper add_refresh_token => sub {
-  my $self = shift;
+  my $c = shift;
   my ($refresh_token, $access_token, $scope, $client_id, $user_id) = @_;
   my $sth = eval { $dbh->prepare('INSERT INTO refresh_tokens (refresh_token, access_token, scope, client_id, user_id) VALUES (?, ?, ?, ?, ?)') } || $log->fatal("Cannot insert refresh_token into database");
-  $sth->execute($refresh_token, $access_token, $scope, $client_id, $user_id);
+  $sth->execute($refresh_token, $access_token, join(' ',@$scope), $client_id, $user_id);
 };
 
 
 # tokens
 helper create_auth_codes_table => sub {
-  my $self = shift;
-  unless (eval { $self->db->prepare('SELECT auth_code, client_id, user_id, expires, redirect_uri, scope FROM auth_codes') } ) {
-    $log->info("Creating table 'auth_codes'");
-    $self->db->do('CREATE TABLE auth_codes (auth_code, client_id INTEGER, user_id INTEGER, expires, redirect_uri, scope)');
-  }
+  my $c = shift;
+  $c->db->do('CREATE TABLE IF NOT EXISTS auth_codes (auth_code, client_id INTEGER, user_id INTEGER, expires, redirect_uri, scope)');
 };
 
 app->create_auth_codes_table;
 
 helper get_auth_code => sub {
-  my $self = shift;
+  my $c = shift;
   my ($auth_code) = @_;
-  my $sth = eval { $self->db->prepare('SELECT client_id, user_id, expires, redirect_uri, scope FROM auth_codes WHERE auth_code = ?') } || $log->fatal("Cannot select auth_code from database");
+  my $sth = eval { $c->db->prepare('SELECT client_id, user_id, expires, redirect_uri, scope FROM auth_codes WHERE auth_code = ?') } || $log->fatal("Cannot select auth_code from database");
   $sth->execute($auth_code);
   my ($client_id, $user_id, $expires, $redirect_uri, $scope) = $sth->fetchrow_array;
   return {auth_code => $auth_code, client_id => $client_id, user_id => $user_id, expires => $expires, redirect_uri => $redirect_uri, scope => $scope};
@@ -196,7 +193,7 @@ helper get_auth_code => sub {
 
 # Code from Net::OAuth2::AuthorizationServer::Manual
 
-my $resource_owner_confirm_scopes_sub = sub {
+my $resource_owner_confirm_scopes_sub = sub {#FIXME
   $log->debug('resource_owner_confirm_scopes_sub');
   my ( %args ) = @_;
 
@@ -224,23 +221,20 @@ my $resource_owner_confirm_scopes_sub = sub {
 
 my $resource_owner_logged_in_sub = sub {
   $log->debug('resource_owner_logged_in_sub');
-  my ( %args ) = @_;
-
+  my (%args) = @_;
   my $c = $args{mojo_controller};
-
-  if ( ! $c->session( 'logged_in' ) ) {
+  if (!$c->session('logged_in')) {
     # we need to redirect back to the /oauth/authorize route after
     # login (with the original params)
-    my $uri = join( '?',$c->url_for('current'),$c->url_with->query );
-    $c->flash( 'redirect_after_login' => $uri );
-    $c->redirect_to( '/oauth/login' );
+    my $uri = join( '?', $c->url_for('current'), $c->url_with->query);
+    $c->flash('redirect_after_login' => $uri);
+    $c->redirect_to('/oauth/login');
     return 0;
   }
-
   return 1;
 };
 
-my $verify_client_sub = sub {
+my $verify_client_sub = sub { #FIXME
   $log->debug('verify_client_sub');
   my ( %args ) = @_;
   
@@ -281,7 +275,7 @@ my $verify_client_sub = sub {
   return ( 0,'unauthorized_client' );
 };
 
-my $store_auth_code_sub = sub {
+my $store_auth_code_sub = sub { #FIXME
   $log->debug('store_auth_code_sub');
   my ( %args ) = @_;
 
@@ -302,7 +296,7 @@ my $store_auth_code_sub = sub {
   return;
 };
   
-my $verify_auth_code_sub = sub {
+my $verify_auth_code_sub = sub { #FIXME
   $log->debug('verify_auth_code_sub');
   my ( %args ) = @_;
 
@@ -384,55 +378,37 @@ my $store_access_token_sub = sub {
 
 my $verify_access_token_sub = sub {
   $log->debug('verify_access_token_sub');
-  my ( %args ) = @_;
-
-  my ( $obj,$access_token,$scopes_ref,$is_refresh_token )
-      = @args{qw/ mojo_controller access_token scopes is_refresh_token /};
-
-  my $rt = $obj->db->get_collection( 'refresh_tokens' )->find_one({
-    refresh_token => $access_token
-								  });
-
-  if ( $is_refresh_token && $rt ) {
-
-    if ( $scopes_ref ) {
-      foreach my $scope ( @{ $scopes_ref // [] } ) {
-	if ( ! exists( $rt->{scope}{$scope} ) or ! $rt->{scope}{$scope} ) {
-	  return ( 0,'invalid_grant' )
+  my (%args) = @_;
+  my ($c, $access_token, $scopes_ref, $is_refresh_token)
+      = @args{qw/mojo_controller access_token scopes is_refresh_token/};
+  my $rt = $c->get_refresh_token($access_token);
+  if ($is_refresh_token && $rt) {
+    if ($scopes_ref) {
+      foreach my $scope (@{$scopes_ref // []}) {
+	if (!exists($rt->{scope}{$scope}) or !$rt->{scope}{$scope}) {
+	  return (0,'scope_mismatch');
 	}
       }
     }
-
     # $rt contains client_id, user_id, etc
     return $rt;
   }
-  elsif (
-    my $at = $obj->db->get_collection( 'access_tokens' )->find_one({
-      access_token => $access_token,
-								   })
-      ) {
-
-    if ( $at->{expires} <= time ) {
+  elsif (my $at = $c->get_access_token($access_token)) {
+    if ($at->{expires} <= time) {
       # need to revoke the access token
-      $obj->db->get_collection( 'access_tokens' )
-          ->remove({ access_token => $access_token });
-
-      return ( 0,'invalid_grant' )
-    } elsif ( $scopes_ref ) {
-
-      foreach my $scope ( @{ $scopes_ref // [] } ) {
-	if ( ! exists( $at->{scope}{$scope} ) or ! $at->{scope}{$scope} ) {
-	  return ( 0,'invalid_grant' )
+      $c->remove_access_token($access_token);
+      return (0,'access_token_expired');
+    } elsif ($scopes_ref) {
+      foreach my $scope (@{$scopes_ref // []}) {
+	if (!exists($at->{scope}{$scope}) or !$at->{scope}{$scope}) {
+	  return (0,'scope_mismatch');
 	}
       }
-
     }
-
     # $at contains client_id, user_id, etc
     return $at;
   }
-
-  return ( 0,'invalid_grant' )
+  return (0,'invalid_token');
 };
 
 my $verify_user_password_sub = sub {
@@ -503,14 +479,25 @@ post '/auth' => sub {
   my $username = $c->param('username');
   my $email = $c->param('email');
   my $password = $c->param('password');
-  my $data = $c->register_user($username, $email, $password);
-  $c->render(json => $data);
+  if ($c->register_user($username, $email, $password)) {
+    $c->render(text => "OK");
+  }
 };
 
 post '/oauth/token' => sub {
   my ($c) = @_;
   if ($c->oauth) {
-    $c->render(json => {ok=>1});
+    $c->render(text => "OK");
+  } else {
+    $c->render(status => 401, text => 'Access denied');
+  }
+};
+
+get '/api/v1/accounts/verify_credentials' => sub {
+  my ($c) = @_;
+  if (my $oauth_details = $c->oauth) {
+    $log->debug("authenticated!");
+    $c->render(json => {id => $oauth_details->{user_id}});
   } else {
     $c->render(status => 401, text => 'Access denied');
   }

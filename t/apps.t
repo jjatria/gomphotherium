@@ -56,13 +56,14 @@ $t->post_ok('/auth' => form => {
     ->status_is(200);
 
 # FIXME: make sure we can't register twice
-# $t->post_ok('/auth' => form => {
-#   username => 'alex',
-#   email => 'alex@gnu.org',
-#   password => '*secret*',
-#   scopes => 'read'})
-#     ->status_is(500)
-#     ->text_is('User already exists');
+$t->post_ok('/auth' => form => {
+  username => 'alex',
+  email => 'alex@gnu.org',
+  password => '*secret*',
+  scopes => 'read'})
+    ->status_is(500);
+
+is($t->tx->res->body, 'User already exists');
 
 # curl -X POST -d "client_id=CLIENT_ID_HERE&client_secret=CLIENT_SECRET_HERE&grant_type=password&username=YOUR_EMAIL&password=YOUR_PASSWORD" -Ss http://localhost:3000/oauth/token
 # curl -X POST -d "client_id=456106006&client_secret=1234&grant_type=password&username=kensanata@gmail.com&password=*secret*" -Ss http://localhost:3000/oauth/token
@@ -81,5 +82,16 @@ $t->post_ok('/oauth/token' => form => {
 
 $hash		 = decode_json $t->tx->res->body;
 my $access_token = $hash->{access_token};
+
+# curl --header "Authorization: Bearer MTQ5MjgxNDQ5NS0zNTI5OTQtMC45OTMxODYwMDk5MzA0OTctSlBRanVqVDdzZzQzZ2dKS1MzcWo1WHp3MkFKUEs4" -sS http://localhost:3000/api/v1/accounts/verify_credentials
+
+$t->ua->on(start => sub {
+  my ($ua, $tx) = @_;
+  $tx->req->headers->authorization("Bearer $access_token");
+});
+
+$t->get_ok('/api/v1/accounts/verify_credentials')
+    ->status_is(200)
+    ->json_has('/id');
 
 done_testing();
