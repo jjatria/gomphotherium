@@ -92,6 +92,7 @@ $t->ua->on(start => sub {
 
 $t->get_ok('/api/v1/accounts/verify_credentials')
     ->status_is(200)
-    ->json_has('/id');
+    ->json_has('/id')
+    ->json_has('/username');
 
 done_testing();

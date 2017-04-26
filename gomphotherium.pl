@@ -114,6 +114,32 @@ helper verify_user => sub {
   return $pbkdf2->validate($hash, $password);
 };
 
+helper get_user => sub {
+  my $c = shift;
+  my ($id) = @_;
+  # id: The ID of the account
+  # username: The username of the account
+  # acct: Equals username for local users, includes @domain for remote ones
+  # display_name: The account's display name
+  # locked: Boolean for when the account cannot be followed without waiting for approval first
+  # created_at: The time the account was created
+  # followers_count: The number of followers for the account
+  # following_count: The number of accounts the given account is following
+  # statuses_count: The number of statuses the account has made
+  # note: Biography of user
+  # url: URL of the user's profile page (can be remote)
+  # avatar: URL to the avatar image
+  # avatar_static: URL to the avatar static image (gif)
+  # header: URL to the header image
+  # header_static: URL to the header static image (gif)
+  my $sth = eval { $c->db->prepare('SELECT username FROM users WHERE user_id = ?') } || $log->fatal("Cannot select user from database");
+  $sth->execute($id);
+  my ($username) = $sth->fetchrow_array;
+  my $user = {};
+  $user->{id} = $id;
+  $user->{username} = $username if $username;
+  return $user;
+};
 
 # tokens
 helper create_tokens_table => sub {
@@ -130,7 +156,7 @@ helper get_access_token => sub {
   my $sth = eval { $c->db->prepare('SELECT access_token, scope, expires, user_id FROM access_tokens WHERE access_token = ?') } || $log->fatal("Cannot select access_token from database");
   $sth->execute($token);
   my ($access_token, $scope, $expires, $user_id) = $sth->fetchrow_array;
-  $scope = [split(/ /, $scope)];
+  $scope = [split(/ /, $scope)] if $scope;
   return {access_token => $access_token, scope => $scope, expires => $expires, user_id => $user_id};
 };
 
@@ -374,6 +400,7 @@ my $store_access_token_sub = sub {
   # add new tokens
   $c->add_access_token($access_token, $scope, time + $expires_in, $refresh_token, $client, $user_id);
   $c->add_refresh_token($refresh_token, $access_token, $scope, $client, $user_id);
+  # FIXME: expire empty?
 };
 
 my $verify_access_token_sub = sub {
