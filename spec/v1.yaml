@@ -1,0 +1,108 @@
+swagger: "2.0"
+
+info:
+  version: "1"
+  title: Mastodon API
+
+basePath: "/api/v1"
+paths:
+  /instance:
+    get:
+      operationId: "fetch_instance"
+      x-mojo-name: "fetch_instance"
+      x-mojo-to: "main#instance"
+      summary: Information about the instance
+      description: |
+        Return information about this instance as a serialised package
+      responses:
+        200:
+          description: |
+            Information for this instance
+          schema:
+            $ref: "#/definitions/Instance"
+        500:
+           $ref: "#/responses/InternalServerError"
+
+  /accounts/{id}:
+    get:
+      operationId: "fetch_account"
+      x-mojo-name: "fetch_account"
+      x-mojo-to: "user_account#fetch"
+      summary: Information about a specified user
+      description: |
+        Return information about the user specified by ID
+      responses:
+        200:
+          description: |
+            Information for this user
+          schema:
+            $ref: "#/definitions/Account"
+        500:
+           $ref: "#/responses/InternalServerError"
+
+definitions:
+  Instance:
+    properties:
+      email:
+        type: string
+      description:
+        type: string
+      title:
+        type: string
+      uri:
+        type: string
+    additionalProperties: false
+
+  Account:
+    properties:
+      id:
+        type: integer
+      acct:
+        type: string
+      avatar:
+        type: string
+      avatar_static:
+        type: string
+      created_at:
+        type: string
+      display_name:
+        type: string
+      followers_count:
+        type: integer
+      header:
+        type: string
+      header_static:
+        type: string
+      locked:
+        type: boolean
+      note:
+        type: string
+      statuses_count:
+        type: integer
+      url:
+        type: string
+      username:
+        type: string
+    additionalProperties: false
+
+  Error:
+    properties:
+      error:
+        type: string
+
+responses:
+  Forbidden:
+    description: |
+      Request is forbidden
+    schema:
+      $ref: "#/definitions/Error"
+  NotFound:
+    description: |
+      Resource was not found
+    schema:
+      $ref: "#/definitions/Error"
+  InternalServerError:
+    description: |
+      An unexpected error occured
+    schema:
+      $ref: "#/definitions/Error"
